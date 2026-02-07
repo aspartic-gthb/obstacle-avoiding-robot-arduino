@@ -1,112 +1,250 @@
 #include <Servo.h>
 #include <NewPing.h>
 
-#define SERVO_PIN 3
-#define ULTRASONIC_SENSOR_TRIG 11
-#define ULTRASONIC_SENSOR_ECHO 12
-#define MAX_REGULAR_MOTOR_SPEED 60
-#define MAX_MOTOR_ADJUST_SPEED 250
-#define DISTANCE_TO_CHECK 30
+// ========== HARDWARE PIN DEFINITIONS ==========
+#define TRIG_PIN      11
+#define ECHO_PIN      12
+#define MAX_DISTANCE  400
 
-// Right motor
-int enableRightMotor = 5;
-int rightMotorPin1 = 7;
-int rightMotorPin2 = 8;
+#define SERVO_PIN     3
 
-// Left motor
-int enableLeftMotor = 6;
-int leftMotorPin1 = 9;
-int leftMotorPin2 = 10;
+// Motor A (Right side)
+#define MOTOR_A_EN    5
+#define MOTOR_A_IN1   6
+#define MOTOR_A_IN2   7
 
-NewPing mySensor(ULTRASONIC_SENSOR_TRIG, ULTRASONIC_SENSOR_ECHO, 400);
-Servo myServo;
+// Motor B (Left side)
+#define MOTOR_B_EN    10
+#define MOTOR_B_IN1   8
+#define MOTOR_B_IN2   9
 
+// ========== TUNABLE PARAMETERS ==========
+#define OBSTACLE_THRESHOLD  35   // Stop if obstacle within 35cm
+#define SAFE_DISTANCE       60   // Need at least 60cm to commit to a direction
+#define MOTOR_SPEED         190  // Base speed
+#define TURN_SPEED          200  // Slightly faster for turns
+
+// Improved avoidance durations
+#define BACKUP_DURATION     600  // Back up longer to create space
+#define SLIGHT_TURN_TIME    250  // Quick turn for minor corrections
+#define HARD_TURN_TIME      700  // Full turn for blocked paths
+
+// Servo scanning - MUCH WIDER FOV
+#define SERVO_CENTER        90
+#define SERVO_RIGHT         10   // Almost full right (was 30)
+#define SERVO_LEFT          170  // Almost full left (was 150)
+#define SERVO_DELAY         500  // Let servo actually get there
+
+#define SENSOR_SAMPLES      2    // Faster scanning
+
+// ========== GLOBAL OBJECTS ==========
+NewPing sonar(TRIG_PIN, ECHO_PIN, MAX_DISTANCE);
+Servo scanServo;
+
+// ========== SETUP ==========
 void setup() {
-  // Motor pin setup
-  pinMode(enableRightMotor, OUTPUT);
-  pinMode(rightMotorPin1, OUTPUT);
-  pinMode(rightMotorPin2, OUTPUT);
-
-  pinMode(enableLeftMotor, OUTPUT);
-  pinMode(leftMotorPin1, OUTPUT);
-  pinMode(leftMotorPin2, OUTPUT);
-
-  // Servo setup
-  myServo.attach(SERVO_PIN);
-  myServo.write(90); // Center the servo initially
-  rotateMotor(0, 0); // Stop motors initially
+  Serial.begin(9600);
+  
+  pinMode(MOTOR_A_EN, OUTPUT);
+  pinMode(MOTOR_A_IN1, OUTPUT);
+  pinMode(MOTOR_A_IN2, OUTPUT);
+  pinMode(MOTOR_B_EN, OUTPUT);
+  pinMode(MOTOR_B_IN1, OUTPUT);
+  pinMode(MOTOR_B_IN2, OUTPUT);
+  
+  scanServo.attach(SERVO_PIN);
+  scanServo.write(SERVO_CENTER);
+  delay(800);  // Longer initial settling time
+  
+  Serial.println("Smart obstacle-avoiding robot ready!");
 }
 
+// ========== MAIN LOOP ==========
 void loop() {
-  int distance = mySensor.ping_cm();
-
-  // If an object is detected within the threshold distance
-  if (distance > 0 && distance < DISTANCE_TO_CHECK) {
-    rotateMotor(0, 0);  // Stop motors
-    delay(500);
-
-    rotateMotor(-MAX_MOTOR_ADJUST_SPEED, -MAX_MOTOR_ADJUST_SPEED);  // Reverse
-    delay(200);
-
-    rotateMotor(0, 0);  // Stop motors
-    delay(500);
-
-    // Rotate the servo to the left and check the left side distance
-    myServo.write(180);
-    delay(500);
-    int distanceLeft = mySensor.ping_cm(); 
-
-    // Rotate the servo to the right and check the right side distance
-    myServo.write(0);
-    delay(500);
-    int distanceRight = mySensor.ping_cm();
-
-    // Return the servo to the center position
-    myServo.write(90);  
-    delay(500);        
-
-    // Handle invalid distance readings (0 means no reading)
-    if (distanceLeft == 0) distanceLeft = 999;  // Large value if no valid reading
-    if (distanceRight == 0) distanceRight = 999;
-
-    // Decide on which way to turn based on the side distances
-    if (distanceLeft > distanceRight) {
-      rotateMotor(MAX_MOTOR_ADJUST_SPEED, -MAX_MOTOR_ADJUST_SPEED);  // Turn left (more space on the left)
-      delay(200);
-    } else {
-      rotateMotor(-MAX_MOTOR_ADJUST_SPEED, MAX_MOTOR_ADJUST_SPEED);  // Turn right (more space on the right)
-      delay(200);
-    }
-
-    rotateMotor(0, 0);  // Stop motors
-    delay(200);     
+  int frontDistance = getDistance();
+  
+  Serial.print("Front: ");
+  Serial.print(frontDistance);
+  Serial.println("cm");
+  
+  if (frontDistance < OBSTACLE_THRESHOLD && frontDistance > 0) {
+    Serial.println(">>> OBSTACLE DETECTED <<<");
+    smartAvoidance();
   } else {
-    // If no obstacle in front, move forward
-    rotateMotor(MAX_REGULAR_MOTOR_SPEED, MAX_REGULAR_MOTOR_SPEED);
+    moveForward();
   }
+  
+  delay(50);
 }
 
-// Function to control motor rotation based on speed
-void rotateMotor(int rightMotorSpeed, int leftMotorSpeed) {
-  // Right motor direction
-  if (rightMotorSpeed < 0) {
-    digitalWrite(rightMotorPin1, LOW);
-    digitalWrite(rightMotorPin2, HIGH);
-  } else {
-    digitalWrite(rightMotorPin1, HIGH);
-    digitalWrite(rightMotorPin2, LOW);
+// ========== SENSOR FUNCTIONS ==========
+int getDistance() {
+  long total = 0;
+  int validReadings = 0;
+  
+  for (int i = 0; i < SENSOR_SAMPLES; i++) {
+    delay(35);
+    unsigned int dist = sonar.ping_cm();
+    
+    if (dist > 0 && dist <= MAX_DISTANCE) {
+      total += dist;
+      validReadings++;
+    }
   }
+  
+  return (validReadings > 0) ? (total / validReadings) : MAX_DISTANCE;
+}
 
-  // Left motor direction
-  if (leftMotorSpeed < 0) {
-    digitalWrite(leftMotorPin1, LOW);
-    digitalWrite(leftMotorPin2, HIGH);
-  } else {
-    digitalWrite(leftMotorPin1, HIGH);
-    digitalWrite(leftMotorPin2, LOW);
+// Enhanced scanning with WIDE field of view
+void smartAvoidance() {
+  stopMotors();
+  delay(300);
+  
+  // Back up to create maneuvering space
+  Serial.println("Backing up...");
+  moveBackward();
+  delay(BACKUP_DURATION);
+  stopMotors();
+  delay(200);
+  
+  // WIDE ANGLE SCAN - Actually look around!
+  Serial.println("Scanning environment...");
+  
+  // Check FAR RIGHT
+  scanServo.write(SERVO_RIGHT);
+  delay(SERVO_DELAY);
+  int farRightDist = getDistance();
+  Serial.print("Far Right (10°): ");
+  Serial.print(farRightDist);
+  Serial.println("cm");
+  
+  // Check RIGHT
+  scanServo.write(60);
+  delay(SERVO_DELAY);
+  int rightDist = getDistance();
+  Serial.print("Right (60°): ");
+  Serial.print(rightDist);
+  Serial.println("cm");
+  
+  // Return to CENTER
+  scanServo.write(SERVO_CENTER);
+  delay(SERVO_DELAY);
+  int centerDist = getDistance();
+  Serial.print("Center (90°): ");
+  Serial.print(centerDist);
+  Serial.println("cm");
+  
+  // Check LEFT
+  scanServo.write(120);
+  delay(SERVO_DELAY);
+  int leftDist = getDistance();
+  Serial.print("Left (120°): ");
+  Serial.print(leftDist);
+  Serial.println("cm");
+  
+  // Check FAR LEFT
+  scanServo.write(SERVO_LEFT);
+  delay(SERVO_DELAY);
+  int farLeftDist = getDistance();
+  Serial.print("Far Left (170°): ");
+  Serial.print(farLeftDist);
+  Serial.println("cm");
+  
+  // Return to center
+  scanServo.write(SERVO_CENTER);
+  delay(300);
+  
+  // ========== DECISION LOGIC ==========
+  // Find the best escape route
+  int maxLeft = max(leftDist, farLeftDist);
+  int maxRight = max(rightDist, farRightDist);
+  
+  // If center is clear enough, just nudge slightly and go
+  if (centerDist > SAFE_DISTANCE) {
+    Serial.println("Decision: Center clear after backup - slight correction");
+    if (maxLeft > maxRight) {
+      turnLeft();
+      delay(SLIGHT_TURN_TIME);
+    } else {
+      turnRight();
+      delay(SLIGHT_TURN_TIME);
+    }
   }
+  // Left side has more space
+  else if (maxLeft > maxRight && maxLeft > SAFE_DISTANCE) {
+    Serial.print("Decision: Turn LEFT (clearest: ");
+    Serial.print(maxLeft);
+    Serial.println("cm)");
+    turnLeft();
+    delay(HARD_TURN_TIME);
+  }
+  // Right side has more space
+  else if (maxRight > maxLeft && maxRight > SAFE_DISTANCE) {
+    Serial.print("Decision: Turn RIGHT (clearest: ");
+    Serial.print(maxRight);
+    Serial.println("cm)");
+    turnRight();
+    delay(HARD_TURN_TIME);
+  }
+  // Everything is blocked - turn around
+  else {
+    Serial.println("Decision: ALL BLOCKED - 180° turn");
+    turnRight();
+    delay(HARD_TURN_TIME * 2);  // Turn almost 180°
+  }
+  
+  stopMotors();
+  delay(200);
+  
+  Serial.println("Resuming forward motion\n");
+}
 
-  // Set motor speeds
-  analogWrite(enableRightMotor, abs(rightMotorSpeed));
-  analogWrite(enableLeftMotor, abs(leftMotorSpeed));    
+// ========== MOTOR CONTROL ==========
+void moveForward() {
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  analogWrite(MOTOR_A_EN, MOTOR_SPEED);
+  
+  digitalWrite(MOTOR_B_IN1, HIGH);
+  digitalWrite(MOTOR_B_IN2, LOW);
+  analogWrite(MOTOR_B_EN, MOTOR_SPEED);
+}
+
+void moveBackward() {
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, HIGH);
+  analogWrite(MOTOR_A_EN, MOTOR_SPEED);
+  
+  digitalWrite(MOTOR_B_IN1, LOW);
+  digitalWrite(MOTOR_B_IN2, HIGH);
+  analogWrite(MOTOR_B_EN, MOTOR_SPEED);
+}
+
+void turnLeft() {
+  digitalWrite(MOTOR_A_IN1, HIGH);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  analogWrite(MOTOR_A_EN, TURN_SPEED);
+  
+  digitalWrite(MOTOR_B_IN1, LOW);
+  digitalWrite(MOTOR_B_IN2, HIGH);
+  analogWrite(MOTOR_B_EN, TURN_SPEED);
+}
+
+void turnRight() {
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, HIGH);
+  analogWrite(MOTOR_A_EN, TURN_SPEED);
+  
+  digitalWrite(MOTOR_B_IN1, HIGH);
+  digitalWrite(MOTOR_B_IN2, LOW);
+  analogWrite(MOTOR_B_EN, TURN_SPEED);
+}
+
+void stopMotors() {
+  analogWrite(MOTOR_A_EN, 0);
+  analogWrite(MOTOR_B_EN, 0);
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  digitalWrite(MOTOR_B_IN1, LOW);
+  digitalWrite(MOTOR_B_IN2, LOW);
 }
